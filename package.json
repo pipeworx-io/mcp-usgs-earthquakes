@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-usgs-earthquakes",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "USGS Earthquake Catalog MCP (FDSNWS event API).",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-ccc3fce00a98383f53e4492bc251309f90cf722e5c0b4191df057cc3027d7e63",
-    "sourceCommit": "b0fb3c31386cf0256dcf1e2f1b3440435a87ec35"
+    "sourceHash": "v1-f588b6ccacfcb7481495989ae25e6ba4b6d74c0132676f9df29195cf617dde4b",
+    "sourceCommit": "66a0692f029179984440cef6938cba7fdd41d66d"
   }
 }
