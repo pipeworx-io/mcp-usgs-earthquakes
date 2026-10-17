@@ -2,15 +2,15 @@
 
 USGS Earthquake Catalog MCP (FDSNWS event API).
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1684+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1819+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `search_earthquakes` | Search the USGS earthquake catalog (FDSNWS event API) for real-time and historical seismic events. Filter by time window, magnitude, depth, and a circular geographic area. Returns a compact list of quakes with magnitude, location, time, coordinates, depth, and significance. Keyless. |
+| `search_earthquakes` | Search the USGS earthquake catalog (FDSNWS event API) for real-time and historical seismic events. Filter by time window, magnitude, depth, and a circular geographic area. For "last N days/hours" questions pass `days`/`hours` rather than computing start_time yourself. Returns a compact list of quakes with magnitude, location, time, coordinates, depth, and significance, plus the exact start_time/end_time and magnitude filter actually queried. Keyless. |
 | `get_earthquake` | Get full detail for a single earthquake by its USGS event id (e.g. "us7000n7n8"). Returns magnitude, location, time, depth, felt reports, tsunami flag, PAGER alert level, status, contributing networks, and detail URLs. Keyless. |
-| `count_earthquakes` | Count earthquakes matching a filter without returning the events — fast for questions like "how many M5+ quakes in the last month near X". Same filters as search_earthquakes (time, magnitude, circular area). Keyless. |
+| `count_earthquakes` | Count earthquakes matching a filter without returning the events — fast for questions like "how many M5+ quakes in the last 7 days near X". Same filters as search_earthquakes (time, magnitude, circular area); for "last N days/hours" questions pass `days`/`hours` rather than computing start_time yourself. The response echoes the exact start_time/end_time and magnitude filter actually queried, ahead of the count itself. Keyless. |
 
 ## Quick Start
 
@@ -56,19 +56,19 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1684+ data sources. The
+Both URLs reach the same gateway and the same 1819+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
 ## No MCP client? Call it over HTTP
 
 ```bash
-curl -X POST https://gateway.pipeworx.io/v1/tools/usgs_earthquakes_search_earthquakes \
+curl -X POST https://gateway.pipeworx.io/v1/tools/search_earthquakes \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
 
-No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/usgs_earthquakes_search_earthquakes`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
+No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/search_earthquakes`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
 
 ## Standalone (no gateway account)
 

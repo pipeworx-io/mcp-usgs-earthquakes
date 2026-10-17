@@ -698,16 +698,30 @@ interface QuakeFeature {
   geometry?: { coordinates?: number[] };
 }
 
+// Shared description text for the start_time/end_time/days/hours quartet —
+// kept in one place so the precedence rule can't drift between the two
+// tools that take it (fleet #3208).
+const START_TIME_DESC =
+  'ISO date/time lower bound, e.g. "2026-06-01" or "2026-06-01T00:00:00". A bare date (no time) is treated as 00:00:00 UTC that day. If given, this (with end_time) takes precedence over `days`/`hours`, which are then ignored. For "in the last N days" questions, prefer `days` instead of computing this yourself — a model-guessed start_time is a common source of silently-wrong counts. Defaults to 30 days before now if start_time, days, and hours are all omitted.';
+const END_TIME_DESC =
+  'ISO date/time upper bound, e.g. "2026-06-09". A bare date is treated as 00:00:00 UTC that day. Defaults to now.';
+const DAYS_DESC =
+  'Trailing window length in days, measured back from the exact current time (e.g. days: 7 for "the last 7 days"). Use this instead of computing a start_time for relative-window questions — it is the only way to get an EXACT trailing window rather than a date-boundary approximation. Ignored if start_time or end_time is given. If `hours` is also given, `hours` wins.';
+const HOURS_DESC =
+  'Trailing window length in hours, measured back from the exact current time (e.g. hours: 168 for "the past 168 hours"). Same precedence as `days` (ignored if start_time/end_time given); takes priority over `days` if both are given.';
+
 const tools: McpToolExport['tools'] = [
   {
     name: 'search_earthquakes',
     description:
-      'Search the USGS earthquake catalog (FDSNWS event API) for real-time and historical seismic events. Filter by time window, magnitude, depth, and a circular geographic area. Returns a compact list of quakes with magnitude, location, time, coordinates, depth, and significance. Keyless.',
+      'Search the USGS earthquake catalog (FDSNWS event API) for real-time and historical seismic events. Filter by time window, magnitude, depth, and a circular geographic area. For "last N days/hours" questions pass `days`/`hours` rather than computing start_time yourself. Returns a compact list of quakes with magnitude, location, time, coordinates, depth, and significance, plus the exact start_time/end_time and magnitude filter actually queried. Keyless.',
     inputSchema: {
       type: 'object',
       properties: {
-        start_time: { type: 'string', description: 'ISO date/time lower bound, e.g. "2026-06-01" or "2026-06-01T00:00:00". Defaults to 30 days ago.' },
-        end_time: { type: 'string', description: 'ISO date/time upper bound, e.g. "2026-06-09". Defaults to now.' },
+        start_time: { type: 'string', description: START_TIME_DESC },
+        end_time: { type: 'string', description: END_TIME_DESC },
+        days: { type: 'number', description: DAYS_DESC },
+        hours: { type: 'number', description: HOURS_DESC },
         min_magnitude: { type: 'number', description: 'Minimum magnitude (e.g. 5 for M5+).' },
         max_magnitude: { type: 'number', description: 'Maximum magnitude.' },
         latitude: { type: 'number', description: 'Center latitude for a circular search (use with longitude + max_radius_km).' },
@@ -738,12 +752,14 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'count_earthquakes',
     description:
-      'Count earthquakes matching a filter without returning the events — fast for questions like "how many M5+ quakes in the last month near X". Same filters as search_earthquakes (time, magnitude, circular area). Keyless.',
+      'Count earthquakes matching a filter without returning the events — fast for questions like "how many M5+ quakes in the last 7 days near X". Same filters as search_earthquakes (time, magnitude, circular area); for "last N days/hours" questions pass `days`/`hours` rather than computing start_time yourself. The response echoes the exact start_time/end_time and magnitude filter actually queried, ahead of the count itself. Keyless.',
     inputSchema: {
       type: 'object',
       properties: {
-        start_time: { type: 'string', description: 'ISO date/time lower bound. Defaults to 30 days ago.' },
-        end_time: { type: 'string', description: 'ISO date/time upper bound. Defaults to now.' },
+        start_time: { type: 'string', description: START_TIME_DESC },
+        end_time: { type: 'string', description: END_TIME_DESC },
+        days: { type: 'number', description: DAYS_DESC },
+        hours: { type: 'number', description: HOURS_DESC },
         min_magnitude: { type: 'number', description: 'Minimum magnitude (e.g. 5 for M5+).' },
         max_magnitude: { type: 'number', description: 'Maximum magnitude.' },
         latitude: { type: 'number', description: 'Center latitude for a circular search.' },
@@ -779,12 +795,105 @@ function isoFromMs(v: unknown): string | null {
   return typeof v === 'number' && Number.isFinite(v) ? new Date(v).toISOString() : null;
 }
 
-/** Map the common filter args (shared by search + count) to FDSNWS query params. */
-function buildQuery(args: Record<string, unknown>): URLSearchParams {
+function strOrEmpty(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_WINDOW_DAYS = 30;
+const BARE_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** What USGS will actually treat a date/time string as, as a UTC ISO string. */
+function isoEcho(raw: string): string {
+  if (BARE_DATE_RE.test(raw)) return `${raw}T00:00:00.000Z`;
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : raw;
+}
+
+interface ResolvedWindow {
+  /** What to send to USGS as starttime/endtime — undefined means "don't set it". */
+  qsStart?: string;
+  qsEnd?: string;
+  /** The exact UTC window this call actually resolves to, for echoing back. */
+  effective_start_time: string;
+  effective_end_time: string;
+  window_note?: string;
+}
+
+/**
+ * Resolve the time window shared by search_earthquakes/count_earthquakes.
+ *
+ * Fixes fleet #3208: a router asked to fill start_time for "the last 7 days"
+ * guessed a wider window (a bare date, or an offset wider than 7*24h), and
+ * the tool silently returned {count} with no window in the response, so the
+ * mismatch (48 vs USGS's actual 36) was uncatchable by any caller.
+ *
+ * Precedence (explicit beats relative, and is documented on both args):
+ *   - start_time and/or end_time, if either is given, is used as-is and
+ *     `days`/`hours` are ignored (noted in the response if both were given).
+ *   - else `days`/`hours` compute an EXACT trailing window ending at the
+ *     current instant (`hours` wins if both given).
+ *   - else default to the trailing 30 days, computed explicitly (not left
+ *     for USGS to default) so it can be echoed exactly.
+ */
+function resolveWindow(args: Record<string, unknown>, nowMs: number): ResolvedWindow {
+  const startRaw = strOrEmpty(args.start_time);
+  const endRaw = strOrEmpty(args.end_time);
+  const days = num(args.days);
+  const hours = num(args.hours);
+  const hasRelative = days !== undefined || hours !== undefined;
+  const hasExplicit = !!startRaw || !!endRaw;
+
+  const notes: string[] = [];
+  if (startRaw && BARE_DATE_RE.test(startRaw)) {
+    notes.push(`start_time "${startRaw}" has no time component — treated as 00:00:00 UTC that day.`);
+  }
+  if (endRaw && BARE_DATE_RE.test(endRaw)) {
+    notes.push(`end_time "${endRaw}" has no time component — treated as 00:00:00 UTC that day.`);
+  }
+
+  if (hasExplicit) {
+    if (hasRelative) {
+      notes.push('start_time/end_time were provided, so they took precedence over days/hours, which were ignored.');
+    }
+    const effective_end_time = endRaw ? isoEcho(endRaw) : new Date(nowMs).toISOString();
+    const effective_start_time = startRaw ? isoEcho(startRaw) : new Date(nowMs - DEFAULT_WINDOW_DAYS * DAY_MS).toISOString();
+    return {
+      qsStart: startRaw || undefined,
+      qsEnd: endRaw || undefined,
+      effective_start_time,
+      effective_end_time,
+      window_note: notes.length ? notes.join(' ') : undefined,
+    };
+  }
+
+  if (hasRelative) {
+    const totalHours = hours !== undefined ? hours : (days as number) * 24;
+    const effective_start_time = new Date(nowMs - totalHours * 60 * 60 * 1000).toISOString();
+    const effective_end_time = new Date(nowMs).toISOString();
+    // Send the exact resolved instants to USGS too, rather than letting it
+    // apply its own default — the whole point is an exact trailing window.
+    return { qsStart: effective_start_time, qsEnd: effective_end_time, effective_start_time, effective_end_time };
+  }
+
+  const effective_start_time = new Date(nowMs - DEFAULT_WINDOW_DAYS * DAY_MS).toISOString();
+  const effective_end_time = new Date(nowMs).toISOString();
+  notes.push(`no start_time, end_time, days, or hours given — defaulted to the trailing ${DEFAULT_WINDOW_DAYS} days.`);
+  return {
+    qsStart: effective_start_time,
+    qsEnd: effective_end_time,
+    effective_start_time,
+    effective_end_time,
+    window_note: notes.join(' '),
+  };
+}
+
+/** Build the common filter args (shared by search + count) to FDSNWS query params, given an already-resolved time window. */
+function buildQuery(args: Record<string, unknown>, window: ResolvedWindow): URLSearchParams {
   const qs = new URLSearchParams({ format: 'geojson' });
 
-  if (typeof args.start_time === 'string' && args.start_time.trim()) qs.set('starttime', args.start_time.trim());
-  if (typeof args.end_time === 'string' && args.end_time.trim()) qs.set('endtime', args.end_time.trim());
+  if (window.qsStart) qs.set('starttime', window.qsStart);
+  if (window.qsEnd) qs.set('endtime', window.qsEnd);
 
   const minMag = num(args.min_magnitude);
   if (minMag !== undefined) qs.set('minmagnitude', String(minMag));
@@ -831,7 +940,8 @@ async function searchEarthquakes(args: Record<string, unknown>): Promise<unknown
   let limit = num(args.limit) ?? 20;
   limit = Math.max(1, Math.min(100, Math.floor(limit)));
 
-  const qs = buildQuery(args);
+  const window = resolveWindow(args, Date.now());
+  const qs = buildQuery(args, window);
   qs.set('limit', String(limit));
 
   const orderRaw = typeof args.order_by === 'string' ? args.order_by.trim() : '';
@@ -845,7 +955,13 @@ async function searchEarthquakes(args: Record<string, unknown>): Promise<unknown
 
   const data = (await res.json()) as { features?: QuakeFeature[]; metadata?: { count?: number } };
   const features = Array.isArray(data.features) ? data.features : [];
+  // Aggregates (window + count) ahead of the records, per fleet #3208 — a
+  // caller must be able to see the exact window a count/search actually ran
+  // against without having to scan into the record list.
   return {
+    window: { start_time: window.effective_start_time, end_time: window.effective_end_time, note: window.window_note },
+    min_magnitude: num(args.min_magnitude),
+    max_magnitude: num(args.max_magnitude),
     count: data.metadata?.count ?? features.length,
     earthquakes: features.slice(0, limit).map(mapQuake),
   };
@@ -892,14 +1008,22 @@ async function getEarthquake(args: Record<string, unknown>): Promise<unknown> {
 }
 
 async function countEarthquakes(args: Record<string, unknown>): Promise<unknown> {
-  const qs = buildQuery(args);
+  const window = resolveWindow(args, Date.now());
+  const qs = buildQuery(args, window);
   const res = await pwFetch(`${BASE}/count?${qs.toString()}`, {
     headers: { Accept: 'application/json', 'User-Agent': UA },
   });
   if (!res.ok) return { error: `USGS: ${res.status} ${(await res.text()).slice(0, 200)}` };
 
   const data = (await res.json()) as { count?: number };
-  return { count: data.count ?? 0 };
+  // Window + filter ahead of the count, per fleet #3208 — the whole bug was
+  // that {count} alone gave no way to catch a wrong window.
+  return {
+    window: { start_time: window.effective_start_time, end_time: window.effective_end_time, note: window.window_note },
+    min_magnitude: num(args.min_magnitude),
+    max_magnitude: num(args.max_magnitude),
+    count: data.count ?? 0,
+  };
 }
 
 export default { tools, callTool, meter: { credits: 1 } } satisfies McpToolExport;
