@@ -3,7 +3,7 @@
   "name": "io.github.pipeworx-io/usgs-earthquakes",
   "title": "Usgs Earthquakes",
   "description": "USGS Earthquake Catalog MCP (FDSNWS event API).",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "websiteUrl": "https://pipeworx.io/packs/usgs-earthquakes",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-usgs-earthquakes",
